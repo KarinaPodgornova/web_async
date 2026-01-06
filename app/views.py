@@ -4,332 +4,202 @@ from rest_framework import status
 import time
 import random
 import requests
-import math
 from concurrent import futures
+import math
 
-# ======= 🔥 НАСТРОЙТЕ ПОД ВАШ СЕРВЕР =======
-GO_SERVER_URL = "http://localhost/api/v1"  # Ваш Go сервер (порт 80)
-AUTH_TOKEN = "secret123"
+# Адрес твоего Go сервиса и токен авторизации
+MAIN_SERVICE_URL = "http://localhost:80/api/v1" 
+AUTH_TOKEN = "secret123"  # Тот же токен, что в Go сервисе
+
 executor = futures.ThreadPoolExecutor(max_workers=5)
-# =========================================
 
-# ------------------- Функция расчета силы тока -------------------
-def calculate_device_amperage(device_data, voltage_bord, amount):
-    """
-    Расчет силы тока для одного типа устройств
-    Формула: I = √(P_ном / R_ном) * (K_запаса / (K_пд * (U_борт / U_ном))) * количество
-    """
+def calculate_device_current_single(current_id, device_id, dev_power, amount):
+    """Асинхронное вычисление силы тока одного устройства"""
     try:
-        # Проверка параметров
-        if (device_data['power_nominal'] <= 0 or 
-            device_data['resistance'] <= 0 or 
-            device_data['voltage_nominal'] <= 0 or
-            voltage_bord <= 0 or
-            device_data['coeff_reserve'] <= 0 or
-            device_data['coeff_efficiency'] <= 0):
-            return 0, False, "Неверные параметры для расчёта тока"
-        
-        # 1. Вычисляем √(P_ном / R_ном)
-        part1 = math.sqrt(device_data['power_nominal'] / device_data['resistance'])
-        
-        # 2. Вычисляем (U_борт / U_ном)
-        voltage_ratio = voltage_bord / device_data['voltage_nominal']
-        
-        # 3. Вычисляем (K_пд * (U_борт / U_ном))
-        denominator = device_data['coeff_efficiency'] * voltage_ratio
-        
-        # 4. Вычисляем (K_запаса / denominator)
-        part2 = device_data['coeff_reserve'] / denominator
-        
-        # 5. Итоговая сила тока для одного устройства
-        amperage_per_device = part1 * part2
-        
-        # 6. Умножаем на количество устройств
-        total_amperage = amperage_per_device * amount
-        
-        return round(total_amperage, 2), True, "Успешно"
-        
-    except Exception as e:
-        return 0, False, f"Ошибка вычисления: {str(e)}"
-
-# ------------------- Асинхронный расчет заявки -------------------
-def calculate_current_async(current_data):
-    """
-    Асинхронный расчет всей заявки с задержкой 5-10 секунд
-    """
-    try:
-        current_id = current_data["current_id"]
-        voltage_bord = current_data["voltage_bord"]
-        devices = current_data["devices"]
-        
-        # Имитация долгого расчета
         calculation_time = random.randint(5, 10)
-        print(f"[ASYNC] Начинаем расчёт для заявки {current_id} - {calculation_time} сек.")
+        print(f"Начинаем расчёт для заявки {current_id}, устройство {device_id} - расчёт займёт {calculation_time} секунд")
         time.sleep(calculation_time)
-        
-        total_amperage = 0
-        device_results = []
-        
-        # Расчет для каждого устройства
-        for device in devices:
-            device_id = device.get('device_id')
-            amount = device.get('amount', 1)
+
+        if amount and amount > 0:
             
-            device_amperage, success, message = calculate_device_amperage(
-                device_data={
-                    'power_nominal': device.get('power_nominal', 0),
-                    'resistance': device.get('resistance', 1),
-                    'voltage_nominal': device.get('voltage_nominal', 220),
-                    'coeff_efficiency': device.get('coeff_efficiency', 0.9),
-                    'coeff_reserve': device.get('coeff_reserve', 1.2)
-                },
-                voltage_bord=voltage_bord,
-                amount=amount
-            )
-            
-            if success:
-                total_amperage += device_amperage
-                
-                device_results.append({
-                    "device_id": device_id,
-                    "amperage": device_amperage,
-                    "amount": amount,
-                    "success": True
-                })
-                print(f"  Устройство {device_id}: {device_amperage} А ({amount} шт.)")
-            else:
-                device_results.append({
-                    "device_id": device_id,
-                    "amperage": 0,
-                    "amount": amount,
-                    "success": False,
-                    "error": message
-                })
-                print(f"  ❌ Устройство {device_id}: ошибка - {message}")
+            amperage = (dev_power * 0.0045) * amount  # 0.0045 - примерный коэффициент
+            success = True
+            print(f"Расчёт выполнен: устройство {device_id}, сила тока = {amperage:.2f} A")
+        else:
+            amperage = 0
+            success = False
+            print(f"Ошибка при расчёте: неправильное количество = {amount}")
         
         return {
             "current_id": current_id,
-            "total_amperage": round(total_amperage, 2),
-            "device_results": device_results,
-            "calculation_time": calculation_time,
-            "success": True
+            "device_id": device_id,
+            "amperage": amperage,
+            "amount": amount,  # Сохраняем amount для отправки обратно
+            "success": success,
+            "calculation_time": calculation_time
         }
-        
     except Exception as e:
-        print(f"❌ Ошибка при расчёте заявки: {e}")
+        print(f"Ошибка при расчёте устройства {device_id}: {e}")
         return {
-            "current_id": current_data.get("current_id", 0),
-            "total_amperage": 0,
-            "device_results": [],
+            "current_id": current_id,
+            "device_id": device_id,
+            "amperage": 0,
             "success": False,
             "error": str(e)
         }
 
-# ------------------- Колбэк для отправки результатов -------------------
-def send_results_to_go_server(task):
-    """Отправка результатов расчета в Go сервер"""
+def send_calculation_result(task):
+    """Колбэк для отправки результата одного устройства в основной сервис"""
     try:
         result = task.result()
+        print(f"Отправка результатов для заявки {result['current_id']}, устройство {result['device_id']}: {result['amperage']} A")
         
-        if not result['success']:
-            print(f"❌ Расчёт не удался для заявки {result['current_id']}")
-            return
-        
-        current_id = result['current_id']
-        
-        print(f"\n[→] Отправка результатов для заявки {current_id}:")
-        print(f"    Общая сила тока: {result['total_amperage']} А")
-        
-        headers = {
-            "Authorization": AUTH_TOKEN,
-            "Content-Type": "application/json"
-        }
-        
-        # 1. Отправляем общую силу тока заявки
-        if result['total_amperage'] > 0:
-            current_url = f"{GO_SERVER_URL}/current-calculations/{current_id}/total-amperage"
-            current_payload = {"total_amperage": result["total_amperage"]}
+        if result['success']:
+            update_url = f"{MAIN_SERVICE_URL}/current-calculations/{result['current_id']}/device_amperage"
             
-            try:
-                response = requests.put(current_url, json=current_payload, headers=headers, timeout=10)
-                print(f"    Обновление заявки: {response.status_code}")
-            except Exception as e:
-                print(f"    ❌ Ошибка обновления заявки: {e}")
-        
-        # 2. Отправляем силу тока для каждого устройства
-        for device_result in result['device_results']:
-            if device_result['success']:
-                device_url = f"{GO_SERVER_URL}/current-devices/{current_id}/{device_result['device_id']}"
-                device_payload = {"amperage": device_result["amperage"]}
-                
-                try:
-                    device_response = requests.put(device_url, json=device_payload, headers=headers, timeout=10)
-                    print(f"    Устройство {device_result['device_id']}: {device_response.status_code}")
-                except Exception as e:
-                    print(f"    ❌ Ошибка устройства {device_result['device_id']}: {e}")
-        
-        print(f"✅ Результаты для заявки {current_id} отправлены")
+            payload = {
+                "device_id": result["device_id"],
+                "amperage": result["amperage"],
+                "amount": result.get("amount"),  # Передаем amount, если он есть
+            }
+            
+            headers = {
+                "Authorization": AUTH_TOKEN,
+                "Content-Type": "application/json"
+            }
+            
+            response = requests.put(update_url, json=payload, headers=headers, timeout=10)
+            
+            print(f"Ответ на обновление устройства {result['device_id']}: {response.status_code}")
+            if response.status_code == 200:
+                print(f"Успешно обновлена сила тока для устройства {result['device_id']}")
+            else:
+                print(f"Ошибка в обновлении силы тока для устройства {result['device_id']}: {response.text}")
+        else:
+            print(f"Расчёт не удался для устройства {result['device_id']}, не отправлен результат")
         
     except Exception as e:
-        print(f"❌ Ошибка в отправке результатов: {e}")
+        print(f"Ошибка в отправке расчёта: {e}")
 
-# ------------------- Основной endpoint для расчета всей заявки -------------------
 @api_view(['POST'])
 def calculate_current(request):
-    """
-    Расчет силы тока для всей заявки
-    Пример запроса:
-    {
-        "current_id": 1,
-        "voltage_bord": 230.0,
-        "devices": [
-            {
-                "device_id": 1,
-                "amount": 2,
-                "power_nominal": 1000,
-                "resistance": 10,
-                "voltage_nominal": 220,
-                "coeff_efficiency": 0.9,
-                "coeff_reserve": 1.2
-            }
-        ]
-    }
-    """
-    required_fields = ["current_id", "voltage_bord", "devices"]
+    """Запуск расчета силы тока для одного устройства"""
+    required_fields = ["current_id", "device_id", "dev_power", "amount"]
     
-    if not all(field in request.data for field in required_fields):
+    if all(field in request.data for field in required_fields):   
+        current_id = request.data["current_id"]
+        device_id = request.data["device_id"] 
+        dev_power = request.data["dev_power"]
+        amount = request.data["amount"]
+        
+        print(f"Получено одно устройство для расчёта: заявка={current_id}, устройство={device_id}, мощность={dev_power}, количество={amount}")
+        
+        task = executor.submit(
+            calculate_device_current_single, 
+            current_id, 
+            device_id, 
+            dev_power,
+            amount
+        )
+        task.add_done_callback(send_calculation_result)
+        
         return Response(
-            {"error": "Отсутствуют обязательные поля: current_id, voltage_bord, devices"}, 
-            status=status.HTTP_400_BAD_REQUEST
+            {
+                "message": "Расчёт силы тока устройства начался", 
+                "current_id": current_id,
+                "device_id": device_id,
+                "estimated_time": "5-10 секунд"
+            },
+            status=status.HTTP_202_ACCEPTED
         )
     
-    current_id = request.data["current_id"]
-    voltage_bord = request.data["voltage_bord"]
-    devices = request.data["devices"]
-    
-    # Проверяем структуру каждого устройства
-    device_required = ["device_id", "amount", "power_nominal", "resistance", 
-                       "voltage_nominal", "coeff_efficiency", "coeff_reserve"]
-    
-    for i, device in enumerate(devices):
-        if not all(field in device for field in device_required):
+    return Response(
+        {"error": "Не все поля были получены"}, 
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
+@api_view(['POST'])
+def calculate_current_batch(request):
+    """Запуск расчета силы тока для всех устройств в заявке"""
+    if "current_id" in request.data and "devices" in request.data:   
+        current_id = request.data["current_id"]
+        devices = request.data["devices"]
+        
+        print(f"Получен запрос на расчёт силы тока для заявки {current_id}, устройств: {len(devices)}")
+        
+        # Получаем мощность устройств из основного сервиса
+        try:
+            # Для каждого устройства получаем его мощность через публичный эндпоинт /devices/:id
+            devices_dict = {}
+            for device_request in devices:
+                device_id = device_request.get("device_id")
+                if not device_id:
+                    continue
+                
+                # Получаем информацию об устройстве (этот эндпоинт доступен без авторизации)
+                device_url = f"{MAIN_SERVICE_URL}/devices/{device_id}"
+                device_response = requests.get(device_url, timeout=5)
+                
+                if device_response.status_code == 200:
+                    device_data = device_response.json()
+                    power_nominal = device_data.get("power_nominal", 0)
+                    devices_dict[device_id] = float(power_nominal) if power_nominal else 0
+                    print(f"Получена мощность устройства {device_id}: {power_nominal} Вт")
+                else:
+                    print(f"Не удалось получить данные устройства {device_id}: {device_response.status_code}")
+                    devices_dict[device_id] = 0
+            
+            # Запускаем расчет для каждого устройства
+            tasks_started = 0
+            for device_request in devices:
+                device_id = device_request.get("device_id")
+                amount = device_request.get("amount", 1)
+                dev_power = devices_dict.get(device_id, 0)
+                
+                if not dev_power or dev_power == 0:
+                    print(f"Мощность устройства {device_id} не указана или равна 0, пропускаем")
+                    continue
+                
+                print(f"Запуск расчёта для устройства {device_id}, мощность={dev_power}, количество={amount}")
+                task = executor.submit(
+                    calculate_device_current_single, 
+                    current_id, 
+                    device_id, 
+                    float(dev_power),
+                    int(amount)
+                )
+                task.add_done_callback(send_calculation_result)
+                tasks_started += 1
+            
+            if tasks_started == 0:
+                return Response(
+                    {"error": "Не удалось запустить расчёт ни для одного устройства"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
             return Response(
-                {"error": f"В устройстве {i} отсутствуют обязательные поля"}, 
-                status=status.HTTP_400_BAD_REQUEST
+                {
+                    "message": "Начат расчёт силы тока для всех устройств", 
+                    "current_id": current_id,
+                    "devices_count": tasks_started,
+                    "estimated_total_time": f"{tasks_started * 5}-{tasks_started * 10} секунд"
+                },
+                status=status.HTTP_202_ACCEPTED
+            )
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка при получении данных заявки: {e}")
+            return Response(
+                {"error": f"Не удалось получить данные заявки: {str(e)}"}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    print(f"📋 Получен запрос на расчёт заявки {current_id}")
-    print(f"   Напряжение бортовой сети: {voltage_bord} В")
-    print(f"   Количество типов устройств: {len(devices)}")
-    
-    # Запускаем асинхронный расчет
-    task = executor.submit(calculate_current_async, request.data)
-    task.add_done_callback(send_results_to_go_server)
-    
     return Response(
-        {
-            "message": "Расчёт силы тока начат",
-            "current_id": current_id,
-            "estimated_time": "5-10 секунд",
-            "devices_count": len(devices),
-            "voltage_bord": voltage_bord
-        },
-        status=status.HTTP_202_ACCEPTED
+        {"error": "current_id и devices обязательны"}, 
+        status=status.HTTP_400_BAD_REQUEST
     )
 
-# ------------------- Endpoint для расчета одного устройства -------------------
-@api_view(['POST'])
-def calculate_single_device(request):
-    """
-    Расчет для одного устройства
-    Пример запроса:
-    {
-        "current_id": 1,
-        "device_id": 1,
-        "amount": 2,
-        "power_nominal": 1000,
-        "resistance": 10,
-        "voltage_nominal": 220,
-        "coeff_efficiency": 0.9,
-        "coeff_reserve": 1.2,
-        "voltage_bord": 230
-    }
-    """
-    required_fields = ["current_id", "device_id", "amount", "power_nominal", 
-                      "resistance", "voltage_nominal", "coeff_efficiency", 
-                      "coeff_reserve", "voltage_bord"]
-    
-    if not all(field in request.data for field in required_fields):
-        return Response(
-            {"error": "Не все поля были получены"}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    current_id = request.data["current_id"]
-    device_id = request.data["device_id"]
-    
-    print(f"🔧 Получено одно устройство для расчёта: заявка={current_id}, устройство={device_id}")
-    
-    # Создаем структуру для расчета
-    device_data = {
-        "current_id": current_id,
-        "voltage_bord": request.data["voltage_bord"],
-        "devices": [{
-            "device_id": device_id,
-            "amount": request.data["amount"],
-            "power_nominal": request.data["power_nominal"],
-            "resistance": request.data["resistance"],
-            "voltage_nominal": request.data["voltage_nominal"],
-            "coeff_efficiency": request.data["coeff_efficiency"],
-            "coeff_reserve": request.data["coeff_reserve"]
-        }]
-    }
-    
-    # Запускаем асинхронный расчет
-    task = executor.submit(calculate_current_async, device_data)
-    task.add_done_callback(send_results_to_go_server)
-    
-    return Response(
-        {
-            "message": "Расчёт одного устройства начался",
-            "current_id": current_id,
-            "device_id": device_id,
-            "estimated_time": "5-10 секунд"
-        },
-        status=status.HTTP_202_ACCEPTED
-    )
-
-# ------------------- Health check -------------------
 @api_view(['GET'])
 def health_check(request):
     """Проверка здоровья сервиса"""
-    return Response(
-        {
-            "status": "healthy",
-            "service": "async-current-calculator",
-            "description": "Асинхронный сервис для расчёта силы тока заявок"
-        },
-        status=status.HTTP_200_OK
-    )
-
-# ------------------- Test endpoint для быстрой проверки -------------------
-@api_view(['POST'])
-def test_calculation(request):
-    """
-    Тестовый endpoint для проверки расчета без задержки
-    Возвращает результат сразу (без 5-10 секунд ожидания)
-    """
-    if "current_id" in request.data and "voltage_bord" in request.data and "devices" in request.data:
-        # Выполняем расчет без задержки
-        result = calculate_current_async(request.data)
-        
-        # Убираем задержку из результата для теста
-        if "calculation_time" in result:
-            result["calculation_time"] = 0
-        
-        return Response(result, status=status.HTTP_200_OK)
-    
-    return Response(
-        {"error": "Нужны current_id, voltage_bord и devices"}, 
-        status=status.HTTP_400_BAD_REQUEST
-    )
+    return Response({"status": "healthy", "service": "async-current-calculator"}, status=status.HTTP_200_OK)
